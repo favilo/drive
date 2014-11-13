@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"path/filepath"
 	"sync"
 )
@@ -25,6 +26,22 @@ import (
 const (
 	maxNumOfConcPullTasks = 4
 )
+
+func docExportsMap() *map[string][]string {
+	return &map[string][]string {
+		"text/plain": []string{"text/plain", "txt",},
+		"application/vnd.google-apps.drawing": []string{"image/svg+xml", "svg+xml",},
+		"application/vnd.google-apps.spreadsheet": []string{
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx",
+		},
+		"application/vnd.google-apps.document": []string{
+			"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx",
+		},
+		"application/vnd.google-apps.presentation": []string{
+			"application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx",
+		},
+	}
+}
 
 // Pull from remote if remote path exists and in a god context. If path is a
 // directory, it recursively pulls from the remote if there are remote changes.
@@ -90,7 +107,8 @@ func (g *Commands) localMod(wg *sync.WaitGroup, change *Change) (err error) {
 	defer g.taskDone()
 	defer wg.Done()
 	destAbsPath := g.context.AbsPathOf(change.Path)
-	if change.Src.BlobAt != "" {
+
+	if change.Src.BlobAt != "" || change.Src.ExportLinks != nil {
 		// download and replace
 		if err = g.download(change); err != nil {
 			return
@@ -108,7 +126,7 @@ func (g *Commands) localAdd(wg *sync.WaitGroup, change *Change) (err error) {
 	if change.Src.IsDir {
 		return os.Mkdir(destAbsPath, os.ModeDir|0755)
 	}
-	if change.Src.BlobAt != "" {
+	if change.Src.BlobAt != "" || change.Src.ExportLinks != nil {
 		// download and create
 		if err = g.download(change); err != nil {
 			return
@@ -124,7 +142,31 @@ func (g *Commands) localDelete(wg *sync.WaitGroup, change *Change) (err error) {
 }
 
 func (g *Commands) download(change *Change) (err error) {
-	destAbsPath := g.context.AbsPathOf(change.Path)
+	exportUrl := ""
+	baseName := change.Path
+
+	// If BlobAt is not set, we are most likely dealing with
+	// Document/SpreadSheet/Image. In this case we'll use the target
+	// exportable type since we cannot directly download the raw data.
+	// We also need to pay attention and add the exported extension
+	// to avoid overriding the original file on re-syncing.
+	if len(change.Src.BlobAt) < 1 {
+		var ok bool
+		var mimeKeyExtList[]string
+
+		exportsMap := *docExportsMap()
+		mimeKeyExtList, ok = exportsMap[change.Src.MimeType]
+		if !ok {
+			mimeKeyExtList = []string{"text/plain", "txt"}
+		}
+
+		exportUrl = change.Src.ExportLinks[mimeKeyExtList[0]]
+		fmt.Print("Exported ", baseName)
+		baseName = strings.Join([]string{baseName, mimeKeyExtList[1]}, ".")
+		fmt.Println(" to: ", baseName)
+	}
+
+	destAbsPath := g.context.AbsPathOf(baseName)
 	var fo *os.File
 	fo, err = os.Create(destAbsPath)
 	if err != nil {
@@ -144,7 +186,7 @@ func (g *Commands) download(change *Change) (err error) {
 			blob.Close()
 		}
 	}()
-	blob, err = g.rem.Download(change.Src.Id)
+	blob, err = g.rem.Download(change.Src.Id, exportUrl)
 	if err != nil {
 		return err
 	}
